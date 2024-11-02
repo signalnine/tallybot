@@ -1,0 +1,4 @@
+nickname = tallyexample
+server = irc.libera.chat:6697
+channel = #tallybot
+use_tls = true
