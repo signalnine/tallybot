@@ -16,10 +16,9 @@ import (
     irc "github.com/thoj/go-ircevent"
 )
 
-// Config struct holds configuration settings from .tally.conf
 type Config struct {
     Nickname       string
-    Server        string
+    Server         string
     Channels      []string
     ActiveChannels []string
     UseTLS        bool
@@ -40,7 +39,6 @@ func NewTallyBot(nick, server string, channels []string, activeChannels []string
         }
     }
     
-    // convert active channels to map for O(1) lookup
     activeMap := make(map[string]bool)
     for _, ch := range activeChannels {
         activeMap[ch] = true
@@ -60,7 +58,6 @@ func (bot *TallyBot) initializeDatabase() {
         log.Fatal(err)
     }
 
-    // Create tables if they don't exist
     statements := []string{
         `CREATE TABLE IF NOT EXISTS tallies (
             item TEXT PRIMARY KEY,
@@ -84,7 +81,6 @@ func (bot *TallyBot) initializeDatabase() {
 }
 
 func (bot *TallyBot) ensureItemExists(item string) {
-    // Check if item exists in tallies
     var count int
     err := bot.db.QueryRow("SELECT COUNT(*) FROM tallies WHERE item = ?", item).Scan(&count)
     if err != nil {
@@ -93,13 +89,11 @@ func (bot *TallyBot) ensureItemExists(item string) {
     }
 
     if count == 0 {
-        // Insert item into tallies
         _, err := bot.db.Exec("INSERT INTO tallies (item, score) VALUES (?, 0)", item)
         if err != nil {
             log.Println(err)
             return
         }
-        // Insert new group
         res, err := bot.db.Exec("INSERT INTO groups DEFAULT VALUES")
         if err != nil {
             log.Println(err)
@@ -110,7 +104,6 @@ func (bot *TallyBot) ensureItemExists(item string) {
             log.Println(err)
             return
         }
-        // Insert into aliases
         _, err = bot.db.Exec("INSERT INTO aliases (item, group_id) VALUES (?, ?)", item, groupID)
         if err != nil {
             log.Println(err)
@@ -140,7 +133,6 @@ func (bot *TallyBot) getGroupID(item string) int {
     var groupID int
     err := bot.db.QueryRow("SELECT group_id FROM aliases WHERE item = ?", item).Scan(&groupID)
     if err != nil {
-        // Item not found
         return 0
     }
     return groupID
@@ -152,13 +144,11 @@ func (bot *TallyBot) linkItems(item1, item2 string) {
     group1 := bot.getGroupID(item1)
     group2 := bot.getGroupID(item2)
     if group1 != group2 {
-        // Merge groups
         _, err := bot.db.Exec("UPDATE aliases SET group_id = ? WHERE group_id = ?", group1, group2)
         if err != nil {
             log.Println(err)
             return
         }
-        // Remove old group
         _, err = bot.db.Exec("DELETE FROM groups WHERE group_id = ?", group2)
         if err != nil {
             log.Println(err)
@@ -173,7 +163,6 @@ func (bot *TallyBot) unlinkItems(item1, item2 string) {
     group1 := bot.getGroupID(item1)
     group2 := bot.getGroupID(item2)
     if group1 == group2 {
-        // Create new group for item2
         res, err := bot.db.Exec("INSERT INTO groups DEFAULT VALUES")
         if err != nil {
             log.Println(err)
@@ -234,7 +223,6 @@ func (bot *TallyBot) getLinkedItems(item string) []string {
 }
 
 func (bot *TallyBot) handleMessage(channel, nick, message string) {
-    // Always respond to PMs
     isPM := !strings.HasPrefix(channel, "#")
     if !isPM && !bot.activeChannels[channel] {
         return
@@ -243,986 +231,12 @@ func (bot *TallyBot) handleMessage(channel, nick, message string) {
     message = strings.TrimSpace(message)
     messageLower := strings.ToLower(message)
 
-    // Regex patterns
-    helpRegex := regexp.MustCompile(`^!helppackage main
-
-import (
-    "bufio"
-    "crypto/tls"
-    "database/sql"
-    "fmt"
-    "log"
-    "os"
-    "os/user"
-    "path/filepath"
-    "regexp"
-    "strings"
-
-    _ "github.com/mattn/go-sqlite3"
-    irc "github.com/thoj/go-ircevent"
-)
-
-// Config struct holds configuration settings from .tally.conf
-type Config struct {
-    Nickname       string
-    Server        string
-    Channels      []string
-    ActiveChannels []string
-    UseTLS        bool
-}
-
-type TallyBot struct {
-    conn           *irc.Connection
-    db             *sql.DB
-    activeChannels map[string]bool
-}
-
-func NewTallyBot(nick, server string, channels []string, activeChannels []string, useTLS bool) *TallyBot {
-    conn := irc.IRC(nick, nick)
-    conn.UseTLS = useTLS
-    if useTLS {
-        conn.TLSConfig = &tls.Config{
-            InsecureSkipVerify: true,
-        }
-    }
-    
-    // convert active channels to map for O(1) lookup
-    activeMap := make(map[string]bool)
-    for _, ch := range activeChannels {
-        activeMap[ch] = true
-    }
-    
-    bot := &TallyBot{
-        conn:           conn,
-        activeChannels: activeMap,
-    }
-    return bot
-}
-
-func (bot *TallyBot) initializeDatabase() {
-    var err error
-    bot.db, err = sql.Open("sqlite3", "./tallies.db")
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    // Create tables if they don't exist
-    statements := []string{
-        `CREATE TABLE IF NOT EXISTS tallies (
-            item TEXT PRIMARY KEY,
-            score INTEGER
-        );`,
-        `CREATE TABLE IF NOT EXISTS aliases (
-            item TEXT PRIMARY KEY,
-            group_id INTEGER
-        );`,
-        `CREATE TABLE IF NOT EXISTS groups (
-            group_id INTEGER PRIMARY KEY AUTOINCREMENT
-        );`,
-    }
-
-    for _, stmt := range statements {
-        _, err := bot.db.Exec(stmt)
-        if err != nil {
-            log.Fatal(err)
-        }
-    }
-}
-
-func (bot *TallyBot) ensureItemExists(item string) {
-    // Check if item exists in tallies
-    var count int
-    err := bot.db.QueryRow("SELECT COUNT(*) FROM tallies WHERE item = ?", item).Scan(&count)
-    if err != nil {
-        log.Println(err)
-        return
-    }
-
-    if count == 0 {
-        // Insert item into tallies
-        _, err := bot.db.Exec("INSERT INTO tallies (item, score) VALUES (?, 0)", item)
-        if err != nil {
-            log.Println(err)
-            return
-        }
-        // Insert new group
-        res, err := bot.db.Exec("INSERT INTO groups DEFAULT VALUES")
-        if err != nil {
-            log.Println(err)
-            return
-        }
-        groupID, err := res.LastInsertId()
-        if err != nil {
-            log.Println(err)
-            return
-        }
-        // Insert into aliases
-        _, err = bot.db.Exec("INSERT INTO aliases (item, group_id) VALUES (?, ?)", item, groupID)
-        if err != nil {
-            log.Println(err)
-            return
-        }
-    }
-}
-
-func (bot *TallyBot) getScore(item string) int {
-    var score int
-    err := bot.db.QueryRow("SELECT score FROM tallies WHERE item = ?", item).Scan(&score)
-    if err != nil {
-        log.Println(err)
-        return 0
-    }
-    return score
-}
-
-func (bot *TallyBot) updateScore(item string, score int) {
-    _, err := bot.db.Exec("UPDATE tallies SET score = ? WHERE item = ?", score, item)
-    if err != nil {
-        log.Println(err)
-    }
-}
-
-func (bot *TallyBot) getGroupID(item string) int {
-    var groupID int
-    err := bot.db.QueryRow("SELECT group_id FROM aliases WHERE item = ?", item).Scan(&groupID)
-    if err != nil {
-        // Item not found
-        return 0
-    }
-    return groupID
-}
-
-func (bot *TallyBot) linkItems(item1, item2 string) {
-    bot.ensureItemExists(item1)
-    bot.ensureItemExists(item2)
-    group1 := bot.getGroupID(item1)
-    group2 := bot.getGroupID(item2)
-    if group1 != group2 {
-        // Merge groups
-        _, err := bot.db.Exec("UPDATE aliases SET group_id = ? WHERE group_id = ?", group1, group2)
-        if err != nil {
-            log.Println(err)
-            return
-        }
-        // Remove old group
-        _, err = bot.db.Exec("DELETE FROM groups WHERE group_id = ?", group2)
-        if err != nil {
-            log.Println(err)
-            return
-        }
-    }
-}
-
-func (bot *TallyBot) unlinkItems(item1, item2 string) {
-    bot.ensureItemExists(item1)
-    bot.ensureItemExists(item2)
-    group1 := bot.getGroupID(item1)
-    group2 := bot.getGroupID(item2)
-    if group1 == group2 {
-        // Create new group for item2
-        res, err := bot.db.Exec("INSERT INTO groups DEFAULT VALUES")
-        if err != nil {
-            log.Println(err)
-            return
-        }
-        newGroupID, err := res.LastInsertId()
-        if err != nil {
-            log.Println(err)
-            return
-        }
-        _, err = bot.db.Exec("UPDATE aliases SET group_id = ? WHERE item = ?", newGroupID, item2)
-        if err != nil {
-            log.Println(err)
-            return
-        }
-    }
-}
-
-func (bot *TallyBot) getTotalScore(item string) int {
-    groupID := bot.getGroupID(item)
-    if groupID == 0 {
-        return bot.getScore(item)
-    }
-    var total int
-    err := bot.db.QueryRow(`
-        SELECT SUM(score) FROM tallies
-        JOIN aliases USING(item)
-        WHERE group_id = ?`, groupID).Scan(&total)
-    if err != nil {
-        log.Println(err)
-        return 0
-    }
-    return total
-}
-
-func (bot *TallyBot) getLinkedItems(item string) []string {
-    groupID := bot.getGroupID(item)
-    if groupID == 0 {
-        return []string{}
-    }
-    rows, err := bot.db.Query("SELECT item FROM aliases WHERE group_id = ? AND item != ?", groupID, item)
-    if err != nil {
-        log.Println(err)
-        return []string{}
-    }
-    defer rows.Close()
-    var items []string
-    for rows.Next() {
-        var linkedItem string
-        err := rows.Scan(&linkedItem)
-        if err != nil {
-            log.Println(err)
-            continue
-        }
-        items = append(items, linkedItem)
-    }
-    return items
-}
-
-func (bot *TallyBot) handleMessage(channel, nick, message string) {
-    if !bot.activeChannels[channel] {
-        return
-    }
-
-    message = strings.TrimSpace(message)
-    messageLower := strings.ToLower(message)
-
-)
-    linkRegex := regexp.MustCompile(`^!link ([\w\.]+) ([\w\.]+)package main
-
-import (
-    "bufio"
-    "crypto/tls"
-    "database/sql"
-    "fmt"
-    "log"
-    "os"
-    "os/user"
-    "path/filepath"
-    "regexp"
-    "strings"
-
-    _ "github.com/mattn/go-sqlite3"
-    irc "github.com/thoj/go-ircevent"
-)
-
-// Config struct holds configuration settings from .tally.conf
-type Config struct {
-    Nickname       string
-    Server        string
-    Channels      []string
-    ActiveChannels []string
-    UseTLS        bool
-}
-
-type TallyBot struct {
-    conn           *irc.Connection
-    db             *sql.DB
-    activeChannels map[string]bool
-}
-
-func NewTallyBot(nick, server string, channels []string, activeChannels []string, useTLS bool) *TallyBot {
-    conn := irc.IRC(nick, nick)
-    conn.UseTLS = useTLS
-    if useTLS {
-        conn.TLSConfig = &tls.Config{
-            InsecureSkipVerify: true,
-        }
-    }
-    
-    // convert active channels to map for O(1) lookup
-    activeMap := make(map[string]bool)
-    for _, ch := range activeChannels {
-        activeMap[ch] = true
-    }
-    
-    bot := &TallyBot{
-        conn:           conn,
-        activeChannels: activeMap,
-    }
-    return bot
-}
-
-func (bot *TallyBot) initializeDatabase() {
-    var err error
-    bot.db, err = sql.Open("sqlite3", "./tallies.db")
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    // Create tables if they don't exist
-    statements := []string{
-        `CREATE TABLE IF NOT EXISTS tallies (
-            item TEXT PRIMARY KEY,
-            score INTEGER
-        );`,
-        `CREATE TABLE IF NOT EXISTS aliases (
-            item TEXT PRIMARY KEY,
-            group_id INTEGER
-        );`,
-        `CREATE TABLE IF NOT EXISTS groups (
-            group_id INTEGER PRIMARY KEY AUTOINCREMENT
-        );`,
-    }
-
-    for _, stmt := range statements {
-        _, err := bot.db.Exec(stmt)
-        if err != nil {
-            log.Fatal(err)
-        }
-    }
-}
-
-func (bot *TallyBot) ensureItemExists(item string) {
-    // Check if item exists in tallies
-    var count int
-    err := bot.db.QueryRow("SELECT COUNT(*) FROM tallies WHERE item = ?", item).Scan(&count)
-    if err != nil {
-        log.Println(err)
-        return
-    }
-
-    if count == 0 {
-        // Insert item into tallies
-        _, err := bot.db.Exec("INSERT INTO tallies (item, score) VALUES (?, 0)", item)
-        if err != nil {
-            log.Println(err)
-            return
-        }
-        // Insert new group
-        res, err := bot.db.Exec("INSERT INTO groups DEFAULT VALUES")
-        if err != nil {
-            log.Println(err)
-            return
-        }
-        groupID, err := res.LastInsertId()
-        if err != nil {
-            log.Println(err)
-            return
-        }
-        // Insert into aliases
-        _, err = bot.db.Exec("INSERT INTO aliases (item, group_id) VALUES (?, ?)", item, groupID)
-        if err != nil {
-            log.Println(err)
-            return
-        }
-    }
-}
-
-func (bot *TallyBot) getScore(item string) int {
-    var score int
-    err := bot.db.QueryRow("SELECT score FROM tallies WHERE item = ?", item).Scan(&score)
-    if err != nil {
-        log.Println(err)
-        return 0
-    }
-    return score
-}
-
-func (bot *TallyBot) updateScore(item string, score int) {
-    _, err := bot.db.Exec("UPDATE tallies SET score = ? WHERE item = ?", score, item)
-    if err != nil {
-        log.Println(err)
-    }
-}
-
-func (bot *TallyBot) getGroupID(item string) int {
-    var groupID int
-    err := bot.db.QueryRow("SELECT group_id FROM aliases WHERE item = ?", item).Scan(&groupID)
-    if err != nil {
-        // Item not found
-        return 0
-    }
-    return groupID
-}
-
-func (bot *TallyBot) linkItems(item1, item2 string) {
-    bot.ensureItemExists(item1)
-    bot.ensureItemExists(item2)
-    group1 := bot.getGroupID(item1)
-    group2 := bot.getGroupID(item2)
-    if group1 != group2 {
-        // Merge groups
-        _, err := bot.db.Exec("UPDATE aliases SET group_id = ? WHERE group_id = ?", group1, group2)
-        if err != nil {
-            log.Println(err)
-            return
-        }
-        // Remove old group
-        _, err = bot.db.Exec("DELETE FROM groups WHERE group_id = ?", group2)
-        if err != nil {
-            log.Println(err)
-            return
-        }
-    }
-}
-
-func (bot *TallyBot) unlinkItems(item1, item2 string) {
-    bot.ensureItemExists(item1)
-    bot.ensureItemExists(item2)
-    group1 := bot.getGroupID(item1)
-    group2 := bot.getGroupID(item2)
-    if group1 == group2 {
-        // Create new group for item2
-        res, err := bot.db.Exec("INSERT INTO groups DEFAULT VALUES")
-        if err != nil {
-            log.Println(err)
-            return
-        }
-        newGroupID, err := res.LastInsertId()
-        if err != nil {
-            log.Println(err)
-            return
-        }
-        _, err = bot.db.Exec("UPDATE aliases SET group_id = ? WHERE item = ?", newGroupID, item2)
-        if err != nil {
-            log.Println(err)
-            return
-        }
-    }
-}
-
-func (bot *TallyBot) getTotalScore(item string) int {
-    groupID := bot.getGroupID(item)
-    if groupID == 0 {
-        return bot.getScore(item)
-    }
-    var total int
-    err := bot.db.QueryRow(`
-        SELECT SUM(score) FROM tallies
-        JOIN aliases USING(item)
-        WHERE group_id = ?`, groupID).Scan(&total)
-    if err != nil {
-        log.Println(err)
-        return 0
-    }
-    return total
-}
-
-func (bot *TallyBot) getLinkedItems(item string) []string {
-    groupID := bot.getGroupID(item)
-    if groupID == 0 {
-        return []string{}
-    }
-    rows, err := bot.db.Query("SELECT item FROM aliases WHERE group_id = ? AND item != ?", groupID, item)
-    if err != nil {
-        log.Println(err)
-        return []string{}
-    }
-    defer rows.Close()
-    var items []string
-    for rows.Next() {
-        var linkedItem string
-        err := rows.Scan(&linkedItem)
-        if err != nil {
-            log.Println(err)
-            continue
-        }
-        items = append(items, linkedItem)
-    }
-    return items
-}
-
-func (bot *TallyBot) handleMessage(channel, nick, message string) {
-    if !bot.activeChannels[channel] {
-        return
-    }
-
-    message = strings.TrimSpace(message)
-    messageLower := strings.ToLower(message)
-
-)
-    unlinkRegex := regexp.MustCompile(`^!unlink ([\w\.]+) ([\w\.]+)package main
-
-import (
-    "bufio"
-    "crypto/tls"
-    "database/sql"
-    "fmt"
-    "log"
-    "os"
-    "os/user"
-    "path/filepath"
-    "regexp"
-    "strings"
-
-    _ "github.com/mattn/go-sqlite3"
-    irc "github.com/thoj/go-ircevent"
-)
-
-// Config struct holds configuration settings from .tally.conf
-type Config struct {
-    Nickname       string
-    Server        string
-    Channels      []string
-    ActiveChannels []string
-    UseTLS        bool
-}
-
-type TallyBot struct {
-    conn           *irc.Connection
-    db             *sql.DB
-    activeChannels map[string]bool
-}
-
-func NewTallyBot(nick, server string, channels []string, activeChannels []string, useTLS bool) *TallyBot {
-    conn := irc.IRC(nick, nick)
-    conn.UseTLS = useTLS
-    if useTLS {
-        conn.TLSConfig = &tls.Config{
-            InsecureSkipVerify: true,
-        }
-    }
-    
-    // convert active channels to map for O(1) lookup
-    activeMap := make(map[string]bool)
-    for _, ch := range activeChannels {
-        activeMap[ch] = true
-    }
-    
-    bot := &TallyBot{
-        conn:           conn,
-        activeChannels: activeMap,
-    }
-    return bot
-}
-
-func (bot *TallyBot) initializeDatabase() {
-    var err error
-    bot.db, err = sql.Open("sqlite3", "./tallies.db")
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    // Create tables if they don't exist
-    statements := []string{
-        `CREATE TABLE IF NOT EXISTS tallies (
-            item TEXT PRIMARY KEY,
-            score INTEGER
-        );`,
-        `CREATE TABLE IF NOT EXISTS aliases (
-            item TEXT PRIMARY KEY,
-            group_id INTEGER
-        );`,
-        `CREATE TABLE IF NOT EXISTS groups (
-            group_id INTEGER PRIMARY KEY AUTOINCREMENT
-        );`,
-    }
-
-    for _, stmt := range statements {
-        _, err := bot.db.Exec(stmt)
-        if err != nil {
-            log.Fatal(err)
-        }
-    }
-}
-
-func (bot *TallyBot) ensureItemExists(item string) {
-    // Check if item exists in tallies
-    var count int
-    err := bot.db.QueryRow("SELECT COUNT(*) FROM tallies WHERE item = ?", item).Scan(&count)
-    if err != nil {
-        log.Println(err)
-        return
-    }
-
-    if count == 0 {
-        // Insert item into tallies
-        _, err := bot.db.Exec("INSERT INTO tallies (item, score) VALUES (?, 0)", item)
-        if err != nil {
-            log.Println(err)
-            return
-        }
-        // Insert new group
-        res, err := bot.db.Exec("INSERT INTO groups DEFAULT VALUES")
-        if err != nil {
-            log.Println(err)
-            return
-        }
-        groupID, err := res.LastInsertId()
-        if err != nil {
-            log.Println(err)
-            return
-        }
-        // Insert into aliases
-        _, err = bot.db.Exec("INSERT INTO aliases (item, group_id) VALUES (?, ?)", item, groupID)
-        if err != nil {
-            log.Println(err)
-            return
-        }
-    }
-}
-
-func (bot *TallyBot) getScore(item string) int {
-    var score int
-    err := bot.db.QueryRow("SELECT score FROM tallies WHERE item = ?", item).Scan(&score)
-    if err != nil {
-        log.Println(err)
-        return 0
-    }
-    return score
-}
-
-func (bot *TallyBot) updateScore(item string, score int) {
-    _, err := bot.db.Exec("UPDATE tallies SET score = ? WHERE item = ?", score, item)
-    if err != nil {
-        log.Println(err)
-    }
-}
-
-func (bot *TallyBot) getGroupID(item string) int {
-    var groupID int
-    err := bot.db.QueryRow("SELECT group_id FROM aliases WHERE item = ?", item).Scan(&groupID)
-    if err != nil {
-        // Item not found
-        return 0
-    }
-    return groupID
-}
-
-func (bot *TallyBot) linkItems(item1, item2 string) {
-    bot.ensureItemExists(item1)
-    bot.ensureItemExists(item2)
-    group1 := bot.getGroupID(item1)
-    group2 := bot.getGroupID(item2)
-    if group1 != group2 {
-        // Merge groups
-        _, err := bot.db.Exec("UPDATE aliases SET group_id = ? WHERE group_id = ?", group1, group2)
-        if err != nil {
-            log.Println(err)
-            return
-        }
-        // Remove old group
-        _, err = bot.db.Exec("DELETE FROM groups WHERE group_id = ?", group2)
-        if err != nil {
-            log.Println(err)
-            return
-        }
-    }
-}
-
-func (bot *TallyBot) unlinkItems(item1, item2 string) {
-    bot.ensureItemExists(item1)
-    bot.ensureItemExists(item2)
-    group1 := bot.getGroupID(item1)
-    group2 := bot.getGroupID(item2)
-    if group1 == group2 {
-        // Create new group for item2
-        res, err := bot.db.Exec("INSERT INTO groups DEFAULT VALUES")
-        if err != nil {
-            log.Println(err)
-            return
-        }
-        newGroupID, err := res.LastInsertId()
-        if err != nil {
-            log.Println(err)
-            return
-        }
-        _, err = bot.db.Exec("UPDATE aliases SET group_id = ? WHERE item = ?", newGroupID, item2)
-        if err != nil {
-            log.Println(err)
-            return
-        }
-    }
-}
-
-func (bot *TallyBot) getTotalScore(item string) int {
-    groupID := bot.getGroupID(item)
-    if groupID == 0 {
-        return bot.getScore(item)
-    }
-    var total int
-    err := bot.db.QueryRow(`
-        SELECT SUM(score) FROM tallies
-        JOIN aliases USING(item)
-        WHERE group_id = ?`, groupID).Scan(&total)
-    if err != nil {
-        log.Println(err)
-        return 0
-    }
-    return total
-}
-
-func (bot *TallyBot) getLinkedItems(item string) []string {
-    groupID := bot.getGroupID(item)
-    if groupID == 0 {
-        return []string{}
-    }
-    rows, err := bot.db.Query("SELECT item FROM aliases WHERE group_id = ? AND item != ?", groupID, item)
-    if err != nil {
-        log.Println(err)
-        return []string{}
-    }
-    defer rows.Close()
-    var items []string
-    for rows.Next() {
-        var linkedItem string
-        err := rows.Scan(&linkedItem)
-        if err != nil {
-            log.Println(err)
-            continue
-        }
-        items = append(items, linkedItem)
-    }
-    return items
-}
-
-func (bot *TallyBot) handleMessage(channel, nick, message string) {
-    if !bot.activeChannels[channel] {
-        return
-    }
-
-    message = strings.TrimSpace(message)
-    messageLower := strings.ToLower(message)
-
-)
-    totalRegex := regexp.MustCompile(`^!total ([\w\.]+)package main
-
-import (
-    "bufio"
-    "crypto/tls"
-    "database/sql"
-    "fmt"
-    "log"
-    "os"
-    "os/user"
-    "path/filepath"
-    "regexp"
-    "strings"
-
-    _ "github.com/mattn/go-sqlite3"
-    irc "github.com/thoj/go-ircevent"
-)
-
-// Config struct holds configuration settings from .tally.conf
-type Config struct {
-    Nickname       string
-    Server        string
-    Channels      []string
-    ActiveChannels []string
-    UseTLS        bool
-}
-
-type TallyBot struct {
-    conn           *irc.Connection
-    db             *sql.DB
-    activeChannels map[string]bool
-}
-
-func NewTallyBot(nick, server string, channels []string, activeChannels []string, useTLS bool) *TallyBot {
-    conn := irc.IRC(nick, nick)
-    conn.UseTLS = useTLS
-    if useTLS {
-        conn.TLSConfig = &tls.Config{
-            InsecureSkipVerify: true,
-        }
-    }
-    
-    // convert active channels to map for O(1) lookup
-    activeMap := make(map[string]bool)
-    for _, ch := range activeChannels {
-        activeMap[ch] = true
-    }
-    
-    bot := &TallyBot{
-        conn:           conn,
-        activeChannels: activeMap,
-    }
-    return bot
-}
-
-func (bot *TallyBot) initializeDatabase() {
-    var err error
-    bot.db, err = sql.Open("sqlite3", "./tallies.db")
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    // Create tables if they don't exist
-    statements := []string{
-        `CREATE TABLE IF NOT EXISTS tallies (
-            item TEXT PRIMARY KEY,
-            score INTEGER
-        );`,
-        `CREATE TABLE IF NOT EXISTS aliases (
-            item TEXT PRIMARY KEY,
-            group_id INTEGER
-        );`,
-        `CREATE TABLE IF NOT EXISTS groups (
-            group_id INTEGER PRIMARY KEY AUTOINCREMENT
-        );`,
-    }
-
-    for _, stmt := range statements {
-        _, err := bot.db.Exec(stmt)
-        if err != nil {
-            log.Fatal(err)
-        }
-    }
-}
-
-func (bot *TallyBot) ensureItemExists(item string) {
-    // Check if item exists in tallies
-    var count int
-    err := bot.db.QueryRow("SELECT COUNT(*) FROM tallies WHERE item = ?", item).Scan(&count)
-    if err != nil {
-        log.Println(err)
-        return
-    }
-
-    if count == 0 {
-        // Insert item into tallies
-        _, err := bot.db.Exec("INSERT INTO tallies (item, score) VALUES (?, 0)", item)
-        if err != nil {
-            log.Println(err)
-            return
-        }
-        // Insert new group
-        res, err := bot.db.Exec("INSERT INTO groups DEFAULT VALUES")
-        if err != nil {
-            log.Println(err)
-            return
-        }
-        groupID, err := res.LastInsertId()
-        if err != nil {
-            log.Println(err)
-            return
-        }
-        // Insert into aliases
-        _, err = bot.db.Exec("INSERT INTO aliases (item, group_id) VALUES (?, ?)", item, groupID)
-        if err != nil {
-            log.Println(err)
-            return
-        }
-    }
-}
-
-func (bot *TallyBot) getScore(item string) int {
-    var score int
-    err := bot.db.QueryRow("SELECT score FROM tallies WHERE item = ?", item).Scan(&score)
-    if err != nil {
-        log.Println(err)
-        return 0
-    }
-    return score
-}
-
-func (bot *TallyBot) updateScore(item string, score int) {
-    _, err := bot.db.Exec("UPDATE tallies SET score = ? WHERE item = ?", score, item)
-    if err != nil {
-        log.Println(err)
-    }
-}
-
-func (bot *TallyBot) getGroupID(item string) int {
-    var groupID int
-    err := bot.db.QueryRow("SELECT group_id FROM aliases WHERE item = ?", item).Scan(&groupID)
-    if err != nil {
-        // Item not found
-        return 0
-    }
-    return groupID
-}
-
-func (bot *TallyBot) linkItems(item1, item2 string) {
-    bot.ensureItemExists(item1)
-    bot.ensureItemExists(item2)
-    group1 := bot.getGroupID(item1)
-    group2 := bot.getGroupID(item2)
-    if group1 != group2 {
-        // Merge groups
-        _, err := bot.db.Exec("UPDATE aliases SET group_id = ? WHERE group_id = ?", group1, group2)
-        if err != nil {
-            log.Println(err)
-            return
-        }
-        // Remove old group
-        _, err = bot.db.Exec("DELETE FROM groups WHERE group_id = ?", group2)
-        if err != nil {
-            log.Println(err)
-            return
-        }
-    }
-}
-
-func (bot *TallyBot) unlinkItems(item1, item2 string) {
-    bot.ensureItemExists(item1)
-    bot.ensureItemExists(item2)
-    group1 := bot.getGroupID(item1)
-    group2 := bot.getGroupID(item2)
-    if group1 == group2 {
-        // Create new group for item2
-        res, err := bot.db.Exec("INSERT INTO groups DEFAULT VALUES")
-        if err != nil {
-            log.Println(err)
-            return
-        }
-        newGroupID, err := res.LastInsertId()
-        if err != nil {
-            log.Println(err)
-            return
-        }
-        _, err = bot.db.Exec("UPDATE aliases SET group_id = ? WHERE item = ?", newGroupID, item2)
-        if err != nil {
-            log.Println(err)
-            return
-        }
-    }
-}
-
-func (bot *TallyBot) getTotalScore(item string) int {
-    groupID := bot.getGroupID(item)
-    if groupID == 0 {
-        return bot.getScore(item)
-    }
-    var total int
-    err := bot.db.QueryRow(`
-        SELECT SUM(score) FROM tallies
-        JOIN aliases USING(item)
-        WHERE group_id = ?`, groupID).Scan(&total)
-    if err != nil {
-        log.Println(err)
-        return 0
-    }
-    return total
-}
-
-func (bot *TallyBot) getLinkedItems(item string) []string {
-    groupID := bot.getGroupID(item)
-    if groupID == 0 {
-        return []string{}
-    }
-    rows, err := bot.db.Query("SELECT item FROM aliases WHERE group_id = ? AND item != ?", groupID, item)
-    if err != nil {
-        log.Println(err)
-        return []string{}
-    }
-    defer rows.Close()
-    var items []string
-    for rows.Next() {
-        var linkedItem string
-        err := rows.Scan(&linkedItem)
-        if err != nil {
-            log.Println(err)
-            continue
-        }
-        items = append(items, linkedItem)
-    }
-    return items
-}
-
-func (bot *TallyBot) handleMessage(channel, nick, message string) {
-    if !bot.activeChannels[channel] {
-        return
-    }
-
-    message = strings.TrimSpace(message)
-    messageLower := strings.ToLower(message)
-
-)
+    helpRegex := regexp.MustCompile(`^!help$`)
+    linkRegex := regexp.MustCompile(`^!link ([\w\.]+) ([\w\.]+)$`)
+    unlinkRegex := regexp.MustCompile(`^!unlink ([\w\.]+) ([\w\.]+)$`)
+    totalRegex := regexp.MustCompile(`^!total ([\w\.]+)$`)
     upvoteRegex := regexp.MustCompile(`([\w\.]+)(\+\+|--)`)
 
-    // Handle help command
     if helpMatch := helpRegex.FindStringSubmatch(messageLower); helpMatch != nil {
         help := `Available commands:
 item++ or item--: Increment/decrement score for item
@@ -1233,7 +247,6 @@ item++ or item--: Increment/decrement score for item
         return
     }
 
-    // Handle unlinking
     if unlinkMatch := unlinkRegex.FindStringSubmatch(messageLower); unlinkMatch != nil {
         item1 := unlinkMatch[1]
         item2 := unlinkMatch[2]
@@ -1243,7 +256,6 @@ item++ or item--: Increment/decrement score for item
         return
     }
 
-    // Handle linking
     if linkMatch := linkRegex.FindStringSubmatch(messageLower); linkMatch != nil {
         item1 := linkMatch[1]
         item2 := linkMatch[2]
@@ -1253,7 +265,6 @@ item++ or item--: Increment/decrement score for item
         return
     }
 
-    // Handle total score query
     if totalMatch := totalRegex.FindStringSubmatch(messageLower); totalMatch != nil {
         item := totalMatch[1]
         totalScore := bot.getTotalScore(item)
@@ -1262,7 +273,6 @@ item++ or item--: Increment/decrement score for item
         return
     }
 
-    // Handle upvote/downvote within the message
     if upvoteMatches := upvoteRegex.FindAllStringSubmatch(message, -1); upvoteMatches != nil {
         for _, match := range upvoteMatches {
             item := strings.ToLower(match[1])
@@ -1277,12 +287,10 @@ item++ or item--: Increment/decrement score for item
             }
             bot.updateScore(item, newScore)
             linkedItems := bot.getLinkedItems(item)
-            // Prepare linked items string
             var linkedStr string
             if len(linkedItems) > 0 {
                 linkedStr = fmt.Sprintf(" (linked with: %s)", strings.Join(linkedItems, ", "))
             }
-            // Respond with item's score and linked items
             response := fmt.Sprintf("%s: [%d]%s", item, newScore, linkedStr)
             bot.conn.Privmsg(channel, response)
         }
@@ -1290,15 +298,12 @@ item++ or item--: Increment/decrement score for item
     }
 }
 
-// readConfig reads configuration from .tally.conf
 func readConfig() (Config, error) {
     var config Config
     var configPaths []string
 
-    // First, look for .tally.conf in the current directory
     configPaths = append(configPaths, ".tally.conf")
 
-    // Then, look for .tally.conf in the user's home directory
     usr, err := user.Current()
     if err == nil {
         homeConfigPath := filepath.Join(usr.HomeDir, ".tally.conf")
@@ -1322,12 +327,10 @@ func readConfig() (Config, error) {
     scanner := bufio.NewScanner(file)
     for scanner.Scan() {
         line := scanner.Text()
-        // Remove comments and whitespace
         line = strings.TrimSpace(line)
         if len(line) == 0 || strings.HasPrefix(line, "#") {
             continue
         }
-        // Split key and value
         parts := strings.SplitN(line, "=", 2)
         if len(parts) != 2 {
             continue
@@ -1347,7 +350,6 @@ func readConfig() (Config, error) {
             valueLower := strings.ToLower(value)
             config.UseTLS = valueLower == "true" || valueLower == "yes" || valueLower == "1"
         default:
-            // Unknown key, ignore or log
             fmt.Printf("Unknown configuration key: %s\n", key)
         }
     }
@@ -1355,7 +357,6 @@ func readConfig() (Config, error) {
         return config, err
     }
 
-    // Set default values if not set
     if config.Nickname == "" {
         config.Nickname = "TallyBot"
     }
@@ -1387,18 +388,15 @@ func main() {
     bot := NewTallyBot(config.Nickname, config.Server, config.Channels, config.ActiveChannels, config.UseTLS)
     bot.initializeDatabase()
 
-    // Add handlers
     bot.conn.AddCallback("001", func(e *irc.Event) {
         for _, channel := range config.Channels {
             bot.conn.Join(channel)
         }
     })
 
-    // Handle invites
     bot.conn.AddCallback("INVITE", func(e *irc.Event) {
         channel := e.Arguments[len(e.Arguments)-1]
         bot.conn.Join(channel)
-        // Add to active channels if not already active
         if !bot.activeChannels[channel] {
             bot.activeChannels[channel] = true
         }
@@ -1412,13 +410,11 @@ func main() {
         bot.handleMessage(channel, nick, message)
     })
 
-    // Connect to server
     err = bot.conn.Connect(config.Server)
     if err != nil {
         fmt.Printf("Failed to connect to IRC server: %s\n", err)
         return
     }
 
-    // Start the bot
     bot.conn.Loop()
 }
