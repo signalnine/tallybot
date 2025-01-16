@@ -1,4 +1,6 @@
 nickname = tallyexample
 server = irc.libera.chat:6697
 channel = #tallybot
+active_channels = #tallybot
+ignorelist = c
 use_tls = true
