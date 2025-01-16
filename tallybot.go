@@ -16,21 +16,33 @@ import (
     irc "github.com/thoj/go-ircevent"
 )
 
+// -------------------------------------------------------------------------
+// Configuration + Structures
+// -------------------------------------------------------------------------
+
 type Config struct {
     Nickname       string
     Server         string
-    Channels      []string
+    Channels       []string
     ActiveChannels []string
-    UseTLS        bool
+    UseTLS         bool
+    IgnoreList     []string // <-- Renamed from BlackList to IgnoreList
 }
 
 type TallyBot struct {
     conn           *irc.Connection
     db             *sql.DB
     activeChannels map[string]bool
+
+    // A map of ignored item -> bool
+    ignoreItems map[string]bool
 }
 
-func NewTallyBot(nick, server string, channels []string, activeChannels []string, useTLS bool) *TallyBot {
+// -------------------------------------------------------------------------
+// Bot Initialization
+// -------------------------------------------------------------------------
+
+func NewTallyBot(nick, server string, channels []string, activeChannels []string, useTLS bool, ignoreList []string) *TallyBot {
     conn := irc.IRC(nick, nick)
     conn.UseTLS = useTLS
     if useTLS {
@@ -38,15 +50,27 @@ func NewTallyBot(nick, server string, channels []string, activeChannels []string
             InsecureSkipVerify: true,
         }
     }
-    
+
+    // Convert activeChannels into a map
     activeMap := make(map[string]bool)
     for _, ch := range activeChannels {
         activeMap[ch] = true
     }
-    
+
+    // Convert ignoreList slice into a quick-lookup map
+    ignoreItemsMap := make(map[string]bool)
+    for _, item := range ignoreList {
+        trimmed := strings.ToLower(strings.TrimSpace(item))
+        if trimmed != "" {
+            ignoreItemsMap[trimmed] = true
+        }
+    }
+
+    // Construct the TallyBot
     bot := &TallyBot{
         conn:           conn,
         activeChannels: activeMap,
+        ignoreItems:    ignoreItemsMap,
     }
     return bot
 }
@@ -79,6 +103,10 @@ func (bot *TallyBot) initializeDatabase() {
         }
     }
 }
+
+// -------------------------------------------------------------------------
+// Database Helpers
+// -------------------------------------------------------------------------
 
 func (bot *TallyBot) ensureItemExists(item string) {
     var count int
@@ -222,6 +250,10 @@ func (bot *TallyBot) getLinkedItems(item string) []string {
     return items
 }
 
+// -------------------------------------------------------------------------
+// IRC Message Handling
+// -------------------------------------------------------------------------
+
 func (bot *TallyBot) handleMessage(channel, nick, message string) {
     isPM := !strings.HasPrefix(channel, "#")
     if !isPM && !bot.activeChannels[channel] {
@@ -231,22 +263,30 @@ func (bot *TallyBot) handleMessage(channel, nick, message string) {
     message = strings.TrimSpace(message)
     messageLower := strings.ToLower(message)
 
-    helpRegex := regexp.MustCompile(`^!help$`)
+    helpRegex := regexp.MustCompile(fmt.Sprintf(`^%s[\s:,]+(?:help|commands)`, strings.ToLower(bot.conn.GetNick())))
     linkRegex := regexp.MustCompile(`^!link ([\w\.]+) ([\w\.]+)$`)
     unlinkRegex := regexp.MustCompile(`^!unlink ([\w\.]+) ([\w\.]+)$`)
     totalRegex := regexp.MustCompile(`^!total ([\w\.]+)$`)
-    upvoteRegex := regexp.MustCompile(`([\w\.]+)(\+\+|--)`)
+    upvoteRegex := regexp.MustCompile(`(?:"([^"]+)"|([\w\.]+))(\+\+|--)`)
 
+    // Help/command list
     if helpMatch := helpRegex.FindStringSubmatch(messageLower); helpMatch != nil {
-        help := `Available commands:
-item++ or item--: Increment/decrement score for item
-!link item1 item2: Link two items to share scores
-!unlink item1 item2: Unlink two items
-!total item: Show total score for item and all linked items`
-        bot.conn.Privmsg(channel, help)
+        helpLines := []string{
+            "Available commands:",
+            "item++ or item--: Increment/decrement score for item",
+            "!link item1 item2: Link two items to share scores",
+            "!unlink item1 item2: Unlink two items",
+            "!total item: Show total score for item and all linked items",
+            "",
+            "Items on the ignorelist will not be tallied.",
+        }
+        for _, line := range helpLines {
+            bot.conn.Privmsg(channel, line)
+        }
         return
     }
 
+    // Unlink
     if unlinkMatch := unlinkRegex.FindStringSubmatch(messageLower); unlinkMatch != nil {
         item1 := unlinkMatch[1]
         item2 := unlinkMatch[2]
@@ -256,6 +296,7 @@ item++ or item--: Increment/decrement score for item
         return
     }
 
+    // Link
     if linkMatch := linkRegex.FindStringSubmatch(messageLower); linkMatch != nil {
         item1 := linkMatch[1]
         item2 := linkMatch[2]
@@ -265,6 +306,7 @@ item++ or item--: Increment/decrement score for item
         return
     }
 
+    // Show total
     if totalMatch := totalRegex.FindStringSubmatch(messageLower); totalMatch != nil {
         item := totalMatch[1]
         totalScore := bot.getTotalScore(item)
@@ -273,10 +315,28 @@ item++ or item--: Increment/decrement score for item
         return
     }
 
+    // Upvote/Downvote
     if upvoteMatches := upvoteRegex.FindAllStringSubmatch(message, -1); upvoteMatches != nil {
         for _, match := range upvoteMatches {
-            item := strings.ToLower(match[1])
-            operation := match[2]
+            // match[1] is the item if quoted; match[2] if not quoted
+            item := match[1]
+            if item == "" {
+                item = match[2]
+            }
+            // match[3] is "++" or "--"
+            operation := match[3]
+
+            // Convert item to lowercase for consistent tracking + ignorelist check
+            item = strings.ToLower(item)
+
+            // Skip if on ignorelist
+            if bot.ignoreItems[item] {
+                // Optional: announce it's on ignorelist or remain silent
+                log.Printf("Ignoring item on ignorelist: %s", item)
+                continue
+            }
+
+            // Not on ignorelist, proceed
             bot.ensureItemExists(item)
             currentScore := bot.getScore(item)
             var newScore int
@@ -285,7 +345,9 @@ item++ or item--: Increment/decrement score for item
             } else {
                 newScore = currentScore - 1
             }
+
             bot.updateScore(item, newScore)
+
             linkedItems := bot.getLinkedItems(item)
             var linkedStr string
             if len(linkedItems) > 0 {
@@ -298,10 +360,15 @@ item++ or item--: Increment/decrement score for item
     }
 }
 
+// -------------------------------------------------------------------------
+// Configuration + Main
+// -------------------------------------------------------------------------
+
 func readConfig() (Config, error) {
     var config Config
     var configPaths []string
 
+    // Possible config file paths
     configPaths = append(configPaths, ".tally.conf")
 
     usr, err := user.Current()
@@ -349,6 +416,12 @@ func readConfig() (Config, error) {
         case "use_tls":
             valueLower := strings.ToLower(value)
             config.UseTLS = valueLower == "true" || valueLower == "yes" || valueLower == "1"
+        case "ignorelist": // <-- formerly 'blacklist'
+            items := strings.Split(value, ",")
+            for i := range items {
+                items[i] = strings.TrimSpace(items[i])
+            }
+            config.IgnoreList = items
         default:
             fmt.Printf("Unknown configuration key: %s\n", key)
         }
@@ -384,8 +457,19 @@ func main() {
         config.Nickname, config.Server, strings.Join(config.Channels, ", "))
     fmt.Printf("Bot will actively respond in: '%s'\n",
         strings.Join(config.ActiveChannels, ", "))
+    if len(config.IgnoreList) > 0 {
+        fmt.Printf("Ignoring items from ignorelist: %v\n", config.IgnoreList)
+    }
 
-    bot := NewTallyBot(config.Nickname, config.Server, config.Channels, config.ActiveChannels, config.UseTLS)
+    // Pass the ignorelist items
+    bot := NewTallyBot(
+        config.Nickname,
+        config.Server,
+        config.Channels,
+        config.ActiveChannels,
+        config.UseTLS,
+        config.IgnoreList,
+    )
     bot.initializeDatabase()
 
     bot.conn.AddCallback("001", func(e *irc.Event) {
@@ -410,6 +494,7 @@ func main() {
         bot.handleMessage(channel, nick, message)
     })
 
+    // Connect and loop
     err = bot.conn.Connect(config.Server)
     if err != nil {
         fmt.Printf("Failed to connect to IRC server: %s\n", err)
